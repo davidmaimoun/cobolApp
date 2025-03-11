@@ -1,9 +1,13 @@
-import { Account } from "../types/types";
+import { Account, Accounts } from "../types/types";
 import apiService from "./apiServices";
 
-const apiEndpoint = '/account'
+const apiEndpoint = '/accounts'
 
-export const getAccount = async(userId: string): Promise<Account|null> => {
+export const getAllAccounts = async(userId: number): Promise<Accounts|null> => {
+    return await apiService.get(`${apiEndpoint}/all/${userId}`)
+}
+
+export const getUserAccounts = async(userId: number): Promise<Account[]|null> => {
     return await apiService.get(`${apiEndpoint}/${userId}`)
 }
 
