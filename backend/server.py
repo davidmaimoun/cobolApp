@@ -14,9 +14,14 @@ CORS(app)
 
 # VARIABLES #################################
 SECRET_KEY  = "your_secret_key"
-DBS_DIR     = "dbs"
-COBOL_PROGRAMS_DIR = 'cobol_programs'
 
+DBS_DIR     = "dbs"
+
+COBOL_PROGRAMS_DIR = 'cobol_programs'
+ACCOUNTS_TABLE = 'accounts'
+TRANSACTIONS_TABLE = 'transactions'
+
+ACCOUNT_NUMBER_COLUMN = 'account_number'
 
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
@@ -36,14 +41,16 @@ def fetch_data(db_path, table_name, data:Optional[Dict[str, Any]]=None):
         cursor = conn.cursor()
 
         cursor.execute(f"PRAGMA table_info({table_name})")
-        columns = [column[1] for column in cursor.fetchall()]  #
+        columns = [column[1] for column in cursor.fetchall()]  
+
         if data:
-            cursor.execute(f"SELECT * FROM {table_name} WHERE {data['name']} = ?", data['value'])
+            cursor.execute(f"SELECT * FROM {table_name} WHERE {data['name']} = ?", (data['value'],))
         else:
             cursor.execute(f"SELECT * FROM {table_name}")
         
         data_fetched = cursor.fetchall()
-
+        print(data_fetched)
+        
         conn.close()
 
         return [dict(zip(columns, row)) for row in data_fetched]
@@ -79,22 +86,23 @@ def login():
 @app.route("/transactions/<user_id>", methods=["GET"])
 def get_transactions(user_id):
     db_file = os.path.join(DBS_DIR, 'bank.db')
-    
-    data = fetch_data(db_file, 'transactions', {"name": 'from_id', "value": user_id})
+    data = fetch_data(db_file, TRANSACTIONS_TABLE, {"name": 'from_user_id', "value": str(user_id)})
 
     return data, 200
 
 @app.route("/transfer", methods=["POST"])
 def transfer_money():
     data = request.json
-    from_id = str(data.get("from_id"))
-    to_id = str(data.get("to_id"))
+    from_account = str(data.get("from_account"))
+    to_account = str(data.get("to_account"))
     amount = float(data.get("amount"))
+    from_user_id = int(data.get("from_user_id"))
+    to_user_id   = int(data.get("destination_user_id"))
 
     db_file = os.path.join(DBS_DIR, 'bank.db')
     
-    from_user_data = fetch_data(db_file, 'users', {"name": 'id', "value": from_id})
-    to_user_data   = fetch_data(db_file, 'users', {"name": 'id', "value": to_id})
+    from_user_data = fetch_data(db_file, ACCOUNTS_TABLE, {"name": ACCOUNT_NUMBER_COLUMN, "value": from_account})
+    to_user_data   = fetch_data(db_file, ACCOUNTS_TABLE, {"name": ACCOUNT_NUMBER_COLUMN, "value": to_account})
 
     if not (from_user_data and to_user_data):
         msg = 'Cannot transfer the money'
@@ -126,10 +134,11 @@ def transfer_money():
     if "YES" in result.stdout:
         from_user_account = from_user['account_number']
         to_user_account   = to_user['account_number']
-        cursor.execute("UPDATE users SET balance = balance - ? WHERE account_number = ?", (amount, from_user_account))
-        cursor.execute("UPDATE users SET balance = balance + ? WHERE account_number = ?", (amount, to_user_account))
+        cursor.execute(f"UPDATE {ACCOUNTS_TABLE} SET balance = balance - ? WHERE account_number = ?", (amount, from_user_account))
+        cursor.execute(f"UPDATE {ACCOUNTS_TABLE} SET balance = balance + ? WHERE account_number = ?", (amount, to_user_account))
 
-        cursor.execute("INSERT INTO transactions (from_account, to_account, amount) VALUES (?, ?, ?)", (from_user_account, to_user_account, amount))
+        cursor.execute("INSERT INTO transactions (from_user_id, to_user_id, from_account, to_account, amount) VALUES (?, ?, ?, ?, ?)", 
+                (from_user_id, to_user_id, from_user_account, to_user_account, amount))
 
         conn.commit()
         conn.close()
@@ -140,40 +149,49 @@ def transfer_money():
         conn.close()
         return jsonify({"error": "Transfer failed"}), 400
 
-@app.route("/account/<user_id>", methods=["GET"])
+@app.route("/accounts/all/<user_id>", methods=["GET"])
+def get_accounts(user_id):
+    db_file = os.path.join(DBS_DIR, 'bank.db')
+
+    accounts = fetch_data(db_file, ACCOUNTS_TABLE)
+    
+    if not accounts:
+        return ({"message": "error in fetching accounts"})
+
+    destination_accounts_filtered = [account for account in accounts if account['user_id'] != int(user_id)]
+    user_accounts_filtered = [account for account in accounts if account['user_id'] == int(user_id)]
+    
+    return {"destination":destination_accounts_filtered, 
+            "from":user_accounts_filtered}, 200
+        
+
+@app.route("/accounts/<user_id>", methods=["GET"])
 def get_account(user_id):
     try:
         db_file = os.path.join(DBS_DIR, 'bank.db')
-        conn = sqlite3.connect(db_file)
-        cursor = conn.cursor()
         
-        cursor.execute("SELECT account_number, first_name, last_name, balance FROM users WHERE id=?", (user_id,))
-        user = cursor.fetchone()
+        user_accounts = fetch_data(db_file, ACCOUNTS_TABLE, {"name": 'id', "value": user_id})
 
-        user = fetch_data(db_file, 'users', {"name": 'id', "value": user_id})[0] # fetch the only user
+        if not user_accounts:
+            return jsonify({"error": "Accounts not found"}), 404
 
-        if not user:
-            conn.close()
-            return jsonify({"error": "Account not found"}), 404
-
-        balance = user["balance"]
-        if balance > 0:
-            balance_status = "Positive"
-        elif balance < 0:
-            balance_status = "Negative"
-        else:
-            balance_status = "Zero"
-        
-        response_data = {
-            "account_number": user["account_number"],
-            "first_name": user["first_name"],
-            "last_name": user["last_name"],
-            "balance": balance,
-            "balance_status": balance_status
-        }
-
-
-        conn.close()
+        response_data = []
+        for account in user_accounts:
+            balance = account["balance"]
+            if balance > 0:
+                balance_status = "Positive"
+            elif balance < 0:
+                balance_status = "Negative"
+            else:
+                balance_status = "Zero"
+            
+            response_data.append({
+                "account_number": account["account_number"],
+                "first_name": account["first_name"],
+                "last_name": account["last_name"],
+                "balance": balance,
+                "balance_status": balance_status
+            })
  
         return jsonify(response_data), 200
     
